@@ -197,22 +197,6 @@ async function processManga(manga) {
 
   feed(`${state.manga.length} saved (${added} new)`, 'green');
 
-  progress('Verifying with MangaUpdates...', 72);
-  feed('Verifying titles...', 'blue');
-  state.isVerifying = true;
-
-  try {
-    const result = await msg({ type: 'VERIFY_MANGAUPDATES', titles: state.manga });
-    if (result.success) {
-      state.verified = result.results;
-      await persist();
-      const matched = result.results.filter(m => m.muMatch && m.confidence >= 0.7).length;
-      feed(`${matched}/${result.results.length} verified`, 'green');
-      updateBadges();
-    } else feed('Verification failed', 'red');
-  } catch (err) { feed('Verify error', 'red'); }
-  finally { state.isVerifying = false; }
-
   hideProgress();
   $('post-extract-actions').style.display = 'flex';
   toast('Done!', 'success');
@@ -313,12 +297,43 @@ function setupExport() {
 
 async function doExport(format) {
   if (!state.manga.length) { toast('Extract first', 'error'); return; }
-  const vMap = new Map(state.verified.map(v => [v.id, v]));
-  const data = state.manga.map(m => ({ ...m, ...(vMap.get(m.id) || {}) }));
   
   const buttons = $$('.export-option[data-format]');
   buttons.forEach(b => b.style.pointerEvents = 'none');
-  
+
+  if (format === 'mangaupdates') {
+    if (state.verified.length !== state.manga.length) {
+      clearFeed('export-feed');
+      progress('Verifying with MangaUpdates...', 0, 'export');
+      feed('Verifying titles...', 'blue', 'export-feed');
+      state.isVerifying = true;
+
+      try {
+        const result = await msg({ type: 'VERIFY_MANGAUPDATES', titles: state.manga });
+        if (result.success) {
+          state.verified = result.results;
+          await persist();
+          const matched = result.results.filter(m => m.muMatch && m.confidence >= 0.7).length;
+          feed(`${matched}/${result.results.length} verified`, 'green', 'export-feed');
+          updateBadges();
+        } else {
+          feed('Verification failed', 'red', 'export-feed');
+          buttons.forEach(b => b.style.pointerEvents = 'auto');
+          return;
+        }
+      } catch (err) {
+        feed('Verify error', 'red', 'export-feed');
+        buttons.forEach(b => b.style.pointerEvents = 'auto');
+        return;
+      } finally {
+        state.isVerifying = false;
+      }
+    }
+  }
+
+  const vMap = new Map(state.verified.map(v => [v.id, v]));
+  const data = state.manga.map(m => ({ ...m, ...(vMap.get(m.id) || {}) }));
+
   if (format === 'mal') {
     clearFeed('export-feed');
     progress('Preparing generation...', 0, 'export');
@@ -331,6 +346,10 @@ async function doExport(format) {
       toast(`Exported ${r.count || data.length} titles`, 'success');
       if (format === 'mal') {
         feed('XML Generated!', 'green', 'export-feed');
+        hideProgress('export');
+        setTimeout(() => clearFeed('export-feed'), 3000);
+      } else if (format === 'mangaupdates') {
+        feed('TXT Generated!', 'green', 'export-feed');
         hideProgress('export');
         setTimeout(() => clearFeed('export-feed'), 3000);
       }
@@ -396,9 +415,9 @@ function closeModal() { $('modal-backdrop').classList.remove('show'); }
 function onBgMessage(m) {
   if (m.type === 'VERIFY_PROGRESS') {
     const pct = Math.round((m.current / m.total) * 100);
-    progress(`Verifying ${m.current}/${m.total}...`, 72 + (pct * 0.27), 'extract');
+    progress(`Verifying ${m.current}/${m.total}...`, pct, 'export');
     if (m.current === m.total || m.current % 10 === 0) {
-      feed(`Verified ${m.current}/${m.total}`, 'blue', 'activity-feed');
+      feed(`Verified ${m.current}/${m.total}`, 'blue', 'export-feed');
     }
   } else if (m.type === 'MAL_EXPORT_PROGRESS') {
     const pct = Math.round((m.current / m.total) * 100);
