@@ -5,8 +5,20 @@ const state = { manga: [], verified: [], searchQuery: '', isExtracting: false, i
 const $ = id => document.getElementById(id);
 const $$ = sel => document.querySelectorAll(sel);
 
+async function checkAndRedirect() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !tab.url) return;
+    
+    if (!tab.url.includes('weebcentral.com/users')) {
+      chrome.tabs.update(tab.id, { url: 'https://weebcentral.com/users/me/profiles' });
+    }
+  } catch (e) {}
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   await loadState();
+  checkAndRedirect();
   setupNav();
   setupExtract();
   setupList();
@@ -54,8 +66,9 @@ function switchTab(name) {
 }
 
 // ── Feed ──
-function feed(text, type = 'blue') {
-  const el = $('activity-feed');
+function feed(text, type = 'blue', targetId = 'activity-feed') {
+  const el = $(targetId);
+  if (!el) return;
   el.classList.add('show');
   const item = document.createElement('div');
   item.className = 'feed-item';
@@ -65,8 +78,9 @@ function feed(text, type = 'blue') {
   while (el.children.length > 10) el.firstChild.remove();
 }
 
-function clearFeed() {
-  const el = $('activity-feed');
+function clearFeed(targetId = 'activity-feed') {
+  const el = $(targetId);
+  if (!el) return;
   el.innerHTML = '';
   el.classList.remove('show');
 }
@@ -85,10 +99,10 @@ function setupExtract() {
 async function updateTabInfo() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.url?.includes('weebcentral.com')) {
+    if (tab?.url?.includes('weebcentral.com/users')) {
       $('current-tab-url').textContent = tab.url.replace('https://weebcentral.com', '').slice(0, 40);
     } else {
-      $('current-tab-url').textContent = 'Navigate to WeebCentral first';
+      $('current-tab-url').textContent = 'Redirecting to profiles page...';
     }
   } catch (e) {}
 }
@@ -97,7 +111,7 @@ async function extractTab() {
   if (state.isExtracting) return;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-  if (!tab?.url?.includes('weebcentral.com')) {
+  if (!tab?.url?.includes('weebcentral.com/users')) {
     chrome.tabs.update(tab.id, { url: 'https://weebcentral.com/users/me/profiles' });
     toast('Redirecting to WeebCentral...', 'info');
     return;
@@ -205,16 +219,19 @@ async function processManga(manga) {
 }
 
 // ── Progress ──
-function progress(label, pct) {
-  $('extract-progress').classList.add('show');
-  $('extract-progress-label').textContent = label;
-  $('extract-progress-fill').style.width = `${pct}%`;
-  $('extract-progress-pct').textContent = `${Math.round(pct)}%`;
+function progress(label, pct, prefix = 'extract') {
+  $(`${prefix}-progress`).classList.add('show');
+  $(`${prefix}-progress-label`).textContent = label;
+  $(`${prefix}-progress-fill`).style.width = `${pct}%`;
+  $(`${prefix}-progress-pct`).textContent = `${Math.round(pct)}%`;
 }
 
-function hideProgress() {
-  progress('Done', 100);
-  setTimeout(() => { $('extract-progress').classList.remove('show'); $('extract-progress-fill').style.width = '0%'; }, 800);
+function hideProgress(prefix = 'extract') {
+  progress('Done', 100, prefix);
+  setTimeout(() => { 
+    $(`${prefix}-progress`)?.classList.remove('show'); 
+    if ($(`${prefix}-progress-fill`)) $(`${prefix}-progress-fill`).style.width = '0%'; 
+  }, 800);
 }
 
 // ── List ──
@@ -298,11 +315,36 @@ async function doExport(format) {
   if (!state.manga.length) { toast('Extract first', 'error'); return; }
   const vMap = new Map(state.verified.map(v => [v.id, v]));
   const data = state.manga.map(m => ({ ...m, ...(vMap.get(m.id) || {}) }));
+  
+  const buttons = $$('.export-option[data-format]');
+  buttons.forEach(b => b.style.pointerEvents = 'none');
+  
+  if (format === 'mal') {
+    clearFeed('export-feed');
+    progress('Preparing generation...', 0, 'export');
+    feed('Starting MAL export...', 'blue', 'export-feed');
+  }
+
   try {
     const r = await msg({ type: 'EXPORT_DATA', data, format });
-    if (r.success) toast(`Exported ${r.count} titles`, 'success');
+    if (r.success) {
+      toast(`Exported ${r.count || data.length} titles`, 'success');
+      if (format === 'mal') {
+        feed('XML Generated!', 'green', 'export-feed');
+        hideProgress('export');
+        setTimeout(() => clearFeed('export-feed'), 3000);
+      }
+    }
     else throw new Error(r.error);
-  } catch (e) { toast(e.message || 'Export failed', 'error'); }
+  } catch (e) { 
+    toast(e.message || 'Export failed', 'error'); 
+    if (format === 'mal') {
+      feed(e.message || 'Export failed', 'red', 'export-feed');
+      hideProgress('export');
+    }
+  } finally {
+    buttons.forEach(b => b.style.pointerEvents = 'auto');
+  }
 }
 
 async function copyTitles() {
@@ -354,10 +396,15 @@ function closeModal() { $('modal-backdrop').classList.remove('show'); }
 function onBgMessage(m) {
   if (m.type === 'VERIFY_PROGRESS') {
     const pct = Math.round((m.current / m.total) * 100);
-    progress(`Verifying ${m.current}/${m.total}...`, 72 + (pct * 0.27));
+    progress(`Verifying ${m.current}/${m.total}...`, 72 + (pct * 0.27), 'extract');
     if (m.current === m.total || m.current % 10 === 0) {
-      feed(`Verified ${m.current}/${m.total}`, 'blue');
+      feed(`Verified ${m.current}/${m.total}`, 'blue', 'activity-feed');
     }
+  } else if (m.type === 'MAL_EXPORT_PROGRESS') {
+    const pct = Math.round((m.current / m.total) * 100);
+    progress(`Processing ${m.current}/${m.total}...`, pct, 'export');
+    // We intentionally removed the feed() item per user request
+    // so it doesn't spam the activity list for every single series
   }
 }
 

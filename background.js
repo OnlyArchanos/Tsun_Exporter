@@ -6,6 +6,9 @@ const MANGAUPDATES_API = 'https://api.mangaupdates.com/v1';
 let muCurrentDelay = 500;
 let muLastRequestTime = 0;
 
+let jikanCurrentDelay = 1200;
+let jikanLastRequestTime = 0;
+
 // ──────────────────────────────────────────────────────────
 // Message Router
 // ──────────────────────────────────────────────────────────
@@ -437,6 +440,10 @@ async function exportData(data, format) {
       content = generateMUExport(data);
       filename = `tsun-export-mu-${timestamp()}.txt`;
       break;
+    case 'mal':
+      content = await generateMALExportAsync(data);
+      filename = `tsun-export-mal-${timestamp()}.xml`;
+      break;
     default:
       throw new Error('Unknown export format: ' + format);
   }
@@ -467,22 +474,73 @@ function generateMUExport(data) {
   return lines.join('\n');
 }
 
-function generateMALExport(data) {
-  const entries = data.map(item => `
-  <manga>
-    <series_title><![CDATA[${item.title}]]></series_title>
-    <my_status>Reading</my_status>
-    <my_score>0</my_score>
-    <my_times_read>0</my_times_read>
-    <update_on_import>1</update_on_import>
-  </manga>`).join('');
+async function generateMALExportAsync(data) {
+  const entries = [];
+  
+  for (let i = 0; i < data.length; i++) {
+    const item = data[i];
+    let malId = 0;
+    
+    try {
+      // Rate limiting for Jikan API
+      const now = Date.now();
+      const elapsed = now - jikanLastRequestTime;
+      if (elapsed < jikanCurrentDelay) await sleep(jikanCurrentDelay - elapsed);
+      jikanLastRequestTime = Date.now();
 
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<myanimelist>
+      // Search Jikan API
+      const query = encodeURIComponent(item.title);
+      const res = await fetch(`https://api.jikan.moe/v4/manga?q=${query}&limit=1`);
+      
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data && json.data.length > 0) {
+          malId = json.data[0].mal_id;
+        }
+      } else if (res.status === 429) {
+        jikanCurrentDelay += 500; // Back off
+      }
+    } catch (e) {
+      console.warn('Jikan API error for:', item.title, e);
+    }
+    
+    chrome.runtime.sendMessage({
+      type: 'MAL_EXPORT_PROGRESS',
+      current: i + 1,
+      total: data.length,
+      title: item.title,
+      matched: malId > 0
+    }).catch(() => {});
+    
+    // Status mapping (default to Reading, map Completed)
+    let myStatus = 'Reading';
+    if (item.status && item.status.toLowerCase().includes('completed')) {
+      myStatus = 'Completed';
+    }
+    
+    // Chapter extraction
+    let chapterNum = '0.000';
+    if (item.latestChapter) {
+      const match = item.latestChapter.match(/\d+(\.\d+)?/);
+      if (match) chapterNum = parseFloat(match[0]).toFixed(3);
+    }
+
+    entries.push(`
+  <manga>
+    <manga_mangadb_id>${malId || ''}</manga_mangadb_id>
+    <manga_title><![CDATA[${item.title}]]></manga_title>
+    <my_read_volumes>0</my_read_volumes>
+    <my_read_chapters>${chapterNum}</my_read_chapters>
+    <my_status>${myStatus}</my_status>
+    <my_score>0</my_score>
+    <update_on_import>1</update_on_import>
+  </manga>`);
+  }
+
+  return `<myanimelist>
   <myinfo>
     <user_export_type>2</user_export_type>
-  </myinfo>
-  ${entries}
+  </myinfo>${entries.join('')}
 </myanimelist>`;
 }
 
