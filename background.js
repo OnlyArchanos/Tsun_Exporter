@@ -449,7 +449,8 @@ async function exportData(data, format) {
   }
 
   // Service workers can't use Blob/URL.createObjectURL — use data URI
-  const dataUrl = 'data:text/plain;charset=utf-8,' + encodeURIComponent(content);
+  const mimeType = format === 'mal' ? 'application/xml' : 'text/plain';
+  const dataUrl = `data:${mimeType};charset=utf-8,` + encodeURIComponent(content);
 
   await chrome.downloads.download({
     url: dataUrl,
