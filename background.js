@@ -9,6 +9,9 @@ let muLastRequestTime = 0;
 let jikanCurrentDelay = 1200;
 let jikanLastRequestTime = 0;
 
+// Global Abort Flag for exports
+let abortFlag = false;
+
 // ──────────────────────────────────────────────────────────
 // Message Router
 // ──────────────────────────────────────────────────────────
@@ -41,6 +44,9 @@ async function handleMessage(message, sender) {
       return await saveCustomMatch(message.title, message.match);
     case 'FETCH_SERIES_DETAILS':
       return await fetchSeriesDetails(message.seriesId);
+    case 'ABORT_EXPORT':
+      abortFlag = true;
+      return { success: true };
     case 'FAB_CLICKED':
       chrome.action.openPopup();
       return { success: true };
@@ -226,10 +232,16 @@ async function fetchPaginatedSubscriptions(userId) {
 // MangaUpdates Integration
 // ──────────────────────────────────────────────────────────
 async function verifyWithMangaUpdates(titles) {
+  abortFlag = false; // Reset abort string
   const results = [];
   const cache = await getCache();
 
   for (let i = 0; i < titles.length; i++) {
+    if (abortFlag) {
+      await chrome.storage.local.set({ muCache: cache.muCache });
+      throw new Error('Verification aborted by user.');
+    }
+    
     const item = titles[i];
     let result;
 
@@ -476,33 +488,51 @@ function generateMUExport(data) {
 }
 
 async function generateMALExportAsync(data) {
+  abortFlag = false; // Reset abort flag
   const entries = [];
   
   for (let i = 0; i < data.length; i++) {
+    if (abortFlag) {
+      throw new Error('Export aborted by user.');
+    }
+    
     const item = data[i];
     let malId = 0;
     
-    try {
-      // Rate limiting for Jikan API
-      const now = Date.now();
-      const elapsed = now - jikanLastRequestTime;
-      if (elapsed < jikanCurrentDelay) await sleep(jikanCurrentDelay - elapsed);
-      jikanLastRequestTime = Date.now();
+    let retries = 0;
+    const maxRetries = 3;
 
-      // Search Jikan API
-      const query = encodeURIComponent(item.title);
-      const res = await fetch(`https://api.jikan.moe/v4/manga?q=${query}&limit=1`);
-      
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data && json.data.length > 0) {
-          malId = json.data[0].mal_id;
+    while (retries <= maxRetries && malId === 0) {
+      if (abortFlag) throw new Error('Export aborted by user.');
+      try {
+        // Rate limiting for Jikan API
+        const now = Date.now();
+        const elapsed = now - jikanLastRequestTime;
+        if (elapsed < jikanCurrentDelay) await sleep(jikanCurrentDelay - elapsed);
+        jikanLastRequestTime = Date.now();
+
+        // Search Jikan API
+        const query = encodeURIComponent(item.title);
+        const res = await fetch(`https://api.jikan.moe/v4/manga?q=${query}&limit=1`);
+        
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data && json.data.length > 0) {
+            malId = json.data[0].mal_id;
+          }
+          break; // Success, break retry loop
+        } else if (res.status === 429) {
+          jikanCurrentDelay += 500; // Back off
+          retries++;
+          if (retries <= maxRetries) await sleep(1000 * retries); 
+        } else {
+          break; // Other error, don't retry
         }
-      } else if (res.status === 429) {
-        jikanCurrentDelay += 500; // Back off
+      } catch (e) {
+        console.warn('Jikan API error for:', item.title, e);
+        retries++;
+        if (retries <= maxRetries) await sleep(1000 * retries);
       }
-    } catch (e) {
-      console.warn('Jikan API error for:', item.title, e);
     }
     
     chrome.runtime.sendMessage({

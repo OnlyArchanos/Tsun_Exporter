@@ -256,12 +256,13 @@ function mkItem(item, i) {
     : '';
   const ph = `<div class="manga-thumb-placeholder" ${item.thumbnail ? 'style="display:none"' : ''}>${SVG_BOOK}</div>`;
 
-  d.innerHTML = `${thumb}${ph}<div class="manga-info"><div class="manga-title" title="${esc(item.title)}">${esc(item.title)}</div></div><div class="manga-actions"><div class="act-btn" title="Open" data-action="open" data-url="${esc(item.url || '')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></div><div class="act-btn danger" title="Remove" data-action="remove" data-id="${esc(item.id)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div></div>`;
+  d.innerHTML = `${thumb}${ph}<div class="manga-info"><div class="manga-title" title="${esc(item.title)}">${esc(item.title)}</div></div><div class="manga-actions"><div class="act-btn" title="Edit Match" data-action="edit" data-id="${esc(item.id)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div><div class="act-btn" title="Open" data-action="open" data-url="${esc(item.url || '')}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></div><div class="act-btn danger" title="Remove" data-action="remove" data-id="${esc(item.id)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div></div>`;
 
   d.addEventListener('click', e => {
     const a = e.target.closest('[data-action]');
     if (!a) return;
     if (a.dataset.action === 'open' && a.dataset.url) chrome.tabs.create({ url: a.dataset.url });
+    if (a.dataset.action === 'edit') editMatch(a.dataset.id);
     if (a.dataset.action === 'remove') removeManga(a.dataset.id);
   });
   return d;
@@ -273,6 +274,44 @@ async function removeManga(id) {
   await persist();
   updateBadges(); renderList();
   toast('Removed', 'info');
+}
+
+async function editMatch(id) {
+  const item = state.manga.find(m => m.id === id);
+  if (!item) return;
+
+  const url = window.prompt(`Enter MangaUpdates URL for "${item.title}":\n(Leave empty to clear match)`);
+  if (url === null) return; // cancelled
+
+  let matchData = null;
+  if (url.trim()) {
+    const muMatch = url.match(/series\/([^/]+)(?:\/([^/]+))?/);
+    if (!muMatch) {
+      toast('Invalid MangaUpdates URL', 'error');
+      return;
+    }
+    matchData = {
+      id: parseInt(muMatch[1], 36),
+      title: item.title,
+      url: url.trim(),
+    };
+  }
+
+  // Save to background custom match
+  await msg({ type: 'SAVE_CUSTOM_MATCH', title: item.title, match: matchData });
+  
+  // Directly update local verified mapping to instantly reflect the change
+  const existingV = state.verified.find(v => v.id === id);
+  if (existingV) {
+    existingV.muMatch = matchData;
+    existingV.confidence = matchData ? 1.0 : 0;
+  } else {
+    state.verified.push({ id: item.id, title: item.title, muMatch: matchData, confidence: matchData ? 1.0 : 0 });
+  }
+
+  await persist();
+  toast(matchData ? 'Match updated' : 'Match cleared', 'success');
+  renderList();
 }
 
 // ── Export ──
@@ -293,6 +332,12 @@ function setupExport() {
       toast('Cleared', 'info');
     }, true);
   });
+  
+  $('btn-export-abort').addEventListener('click', async () => {
+    $('btn-export-abort').classList.add('hidden');
+    $('btn-export-abort').textContent = 'Aborting...';
+    await msg({ type: 'ABORT_EXPORT' });
+  });
 }
 
 async function doExport(format) {
@@ -300,12 +345,15 @@ async function doExport(format) {
   
   const buttons = $$('.export-option[data-format]');
   buttons.forEach(b => b.style.pointerEvents = 'none');
-
+  const abortBtn = $('btn-export-abort');
+  
   if (format === 'mangaupdates') {
     if (state.verified.length !== state.manga.length) {
       clearFeed('export-feed');
       progress('Verifying with MangaUpdates...', 0, 'export');
       feed('Verifying titles...', 'blue', 'export-feed');
+      abortBtn.textContent = 'Abort';
+      abortBtn.classList.remove('hidden');
       state.isVerifying = true;
 
       try {
@@ -322,11 +370,18 @@ async function doExport(format) {
           return;
         }
       } catch (err) {
-        feed('Verify error', 'red', 'export-feed');
+        if (err.message?.includes('aborted')) {
+          feed('Verification aborted', 'amber', 'export-feed');
+          hideProgress('export');
+        } else {
+          feed('Verify error', 'red', 'export-feed');
+        }
         buttons.forEach(b => b.style.pointerEvents = 'auto');
+        abortBtn.classList.add('hidden');
         return;
       } finally {
         state.isVerifying = false;
+        abortBtn.classList.add('hidden');
       }
     }
   }
@@ -338,6 +393,8 @@ async function doExport(format) {
     clearFeed('export-feed');
     progress('Preparing generation...', 0, 'export');
     feed('Starting MAL export...', 'blue', 'export-feed');
+    abortBtn.textContent = 'Abort';
+    abortBtn.classList.remove('hidden');
   }
 
   try {
@@ -356,13 +413,17 @@ async function doExport(format) {
     }
     else throw new Error(r.error);
   } catch (e) { 
-    toast(e.message || 'Export failed', 'error'); 
+    const msgErr = e.message || 'Export failed';
+    const isAbort = msgErr.includes('aborted');
+    
+    toast(isAbort ? 'Aborted' : msgErr, isAbort ? 'info' : 'error'); 
     if (format === 'mal') {
-      feed(e.message || 'Export failed', 'red', 'export-feed');
+      feed(isAbort ? 'Export aborted' : msgErr, isAbort ? 'amber' : 'red', 'export-feed');
       hideProgress('export');
     }
   } finally {
     buttons.forEach(b => b.style.pointerEvents = 'auto');
+    abortBtn.classList.add('hidden');
   }
 }
 
