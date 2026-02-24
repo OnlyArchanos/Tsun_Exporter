@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Tsun Exporter",
+  "version": "1.0.0",
+  "description": "Extract your WeebCentral subscriptions and export to MangaUpdates, MAL, and more.",
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab",
+    "scripting",
+    "alarms",
+    "notifications",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "https://weebcentral.com/*",
+    "https://api.mangaupdates.com/*",
+    "https://myanimelist.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_mu",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tsun Exporter"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://weebcentral.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["https://weebcentral.com/*"]
+    }
+  ]
+}
