@@ -19,7 +19,7 @@ Tsun Exporter is a Chrome extension that allows you to easily extract your manga
 
 ## Usage
 
-1. Navigate to a WeebCentral profile or library page (e.g. `https://weebcentral.com/users/.../library`).
+1. Navigate to a WeebCentral profile
 2. Click the Tsun Exporter extension icon.
 3. Click "Extract from Current Tab".
 4. Once extracted, switch to the "Export" tab.
