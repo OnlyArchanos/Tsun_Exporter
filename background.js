@@ -15,6 +15,8 @@ let abortFlag = false;
 // ──────────────────────────────────────────────────────────
 // Message Router
 // ──────────────────────────────────────────────────────────
+let activeBackgroundJob = null; // Track full status { type, current, total, label }
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
     .then(sendResponse)
@@ -44,8 +46,14 @@ async function handleMessage(message, sender) {
       return await saveCustomMatch(message.title, message.match);
     case 'FETCH_SERIES_DETAILS':
       return await fetchSeriesDetails(message.seriesId);
+    case 'GET_ACTIVE_TASK':
+      return { success: true, job: activeBackgroundJob };
+    case 'START_BG_EXPORT':
+      startBackgroundExport(message.data, message.format).catch(e => console.error(e));
+      return { success: true };
     case 'ABORT_EXPORT':
       abortFlag = true;
+      activeBackgroundJob = null; // clear it immediately
       return { success: true };
     case 'FAB_CLICKED':
       chrome.action.openPopup();
@@ -195,11 +203,13 @@ function parseSubscriptionHTML(html, baseUrl) {
 }
 
 async function fetchPaginatedSubscriptions(userId) {
+  abortFlag = false; // Reset abort string
   const allManga = [];
   let page = 1;
   const maxPages = 50;
 
   while (page <= maxPages) {
+    if (abortFlag) throw new Error('Scraping aborted by user.');
     try {
       const url = `https://weebcentral.com/users/${userId}/library?page=${page}`;
       const res = await fetch(url);
@@ -229,7 +239,70 @@ async function fetchPaginatedSubscriptions(userId) {
 }
 
 // ──────────────────────────────────────────────────────────
-// MangaUpdates Integration
+// Export Orchestration Pipelines
+// ──────────────────────────────────────────────────────────
+async function startBackgroundExport(data, format) {
+  abortFlag = false;
+  activeBackgroundJob = {
+    type: format,
+    current: 0,
+    total: data.length,
+    label: format === 'mangaupdates' ? 'Verifying with MangaUpdates...' : 'Starting MAL export...'
+  };
+
+  try {
+    if (format === 'mangaupdates') {
+      // Step 1: Check existing verification state bounds
+      const storage = await chrome.storage.local.get(['verified']);
+      let verified = storage.verified || [];
+      if (verified.length !== data.length) {
+        // Run full verification autonomously
+        const result = await verifyWithMangaUpdates(data);
+        if (result.success) {
+          verified = result.results;
+          await chrome.storage.local.set({ verified });
+        } else {
+          throw new Error('Verification failed autonomously');
+        }
+      }
+      
+      // Step 2: Merge the latest metadata into data clone
+      const vMap = new Map(verified.map(v => [v.id, v]));
+      const enrichedData = data.map(m => ({ ...m, ...(vMap.get(m.id) || {}) }));
+
+      // Step 3: Run standard export
+      activeBackgroundJob.label = 'Generating TXT...';
+      const r = await exportData(enrichedData, format);
+      activeBackgroundJob = null;
+      
+      chrome.runtime.sendMessage({ type: 'EXPORT_SUCCESS', format, count: r.count || enrichedData.length }).catch(() => {});
+    } 
+    else if (format === 'mal') {
+      // Step 1: Merge local cached metadata naturally if it exists
+      const storage = await chrome.storage.local.get(['verified']);
+      let verified = storage.verified || [];
+      const vMap = new Map(verified.map(v => [v.id, v]));
+      const enrichedData = data.map(m => ({ ...m, ...(vMap.get(m.id) || {}) }));
+
+      // Step 2: Run Jikan autonomous export
+      activeBackgroundJob.label = 'Fetching MAL IDs...';
+      const r = await exportData(enrichedData, format);
+      activeBackgroundJob = null;
+      
+      chrome.runtime.sendMessage({ type: 'EXPORT_SUCCESS', format, count: r.count || enrichedData.length }).catch(() => {});
+    }
+  } catch (err) {
+    activeBackgroundJob = null;
+    chrome.runtime.sendMessage({ 
+      type: 'EXPORT_ERROR', 
+      format, 
+      error: err.message || 'Background export failed' 
+    }).catch(() => {});
+  }
+}
+
+// ──────────────────────────────────────────────────────────
+// MangaUpdates Verification
 // ──────────────────────────────────────────────────────────
 async function verifyWithMangaUpdates(titles) {
   abortFlag = false; // Reset abort string
@@ -461,8 +534,10 @@ async function exportData(data, format) {
   }
 
   // Service workers can't use Blob/URL.createObjectURL — use data URI
+  // Must convert to base64 encoding to prevent encoding failures on large files in MV3
+  const b64 = btoa(unescape(encodeURIComponent(content)));
   const mimeType = format === 'mal' ? 'application/xml' : 'text/plain';
-  const dataUrl = `data:${mimeType};charset=utf-8,` + encodeURIComponent(content);
+  const dataUrl = `data:${mimeType};base64,${b64}`;
 
   await chrome.downloads.download({
     url: dataUrl,
@@ -643,7 +718,7 @@ async function getCache() {
 }
 
 async function clearCache() {
-  await chrome.storage.local.remove(['muCache', 'customMatches', 'lastScrape']);
+  await chrome.storage.local.remove(['muCache', 'customMatches', 'lastScrape', 'stats', 'verified']);
   return { success: true };
 }
 

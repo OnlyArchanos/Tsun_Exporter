@@ -324,6 +324,7 @@ function setupExport() {
   });
   $('btn-clear-all').addEventListener('click', () => {
     showModal('Reset All Data', 'This will delete all extracted manga and cached data. This cannot be undone.', async () => {
+      try { await msg({ type: 'ABORT_EXPORT' }); } catch(e) {} // Stop anything currently running
       state.manga = []; state.verified = [];
       await persist();
       try { await msg({ type: 'CLEAR_CACHE' }); } catch(e) {}
@@ -340,6 +341,19 @@ function setupExport() {
   });
 }
 
+function restoreExportUI(job) {
+  const buttons = $$('.export-option[data-format]');
+  buttons.forEach(b => b.style.pointerEvents = 'none');
+  const abortBtn = $('btn-export-abort');
+  
+  state.isVerifying = true;
+  clearFeed('export-feed');
+  const pct = Math.round((job.current / job.total) * 100) || 0;
+  progress(job.label || 'Resuming Export...', pct, 'export');
+  abortBtn.textContent = 'Abort';
+  abortBtn.classList.remove('hidden');
+}
+
 async function doExport(format) {
   if (!state.manga.length) { toast('Extract first', 'error'); return; }
   
@@ -347,84 +361,15 @@ async function doExport(format) {
   buttons.forEach(b => b.style.pointerEvents = 'none');
   const abortBtn = $('btn-export-abort');
   
-  if (format === 'mangaupdates') {
-    if (state.verified.length !== state.manga.length) {
-      clearFeed('export-feed');
-      progress('Verifying with MangaUpdates...', 0, 'export');
-      feed('Verifying titles...', 'blue', 'export-feed');
-      abortBtn.textContent = 'Abort';
-      abortBtn.classList.remove('hidden');
-      state.isVerifying = true;
+  clearFeed('export-feed');
+  progress(format === 'mangaupdates' ? 'Verifying with MangaUpdates...' : 'Preparing generation...', 0, 'export');
+  feed('Starting Export...', 'blue', 'export-feed');
+  abortBtn.textContent = 'Abort';
+  abortBtn.classList.remove('hidden');
+  state.isVerifying = true;
 
-      try {
-        const result = await msg({ type: 'VERIFY_MANGAUPDATES', titles: state.manga });
-        if (result.success) {
-          state.verified = result.results;
-          await persist();
-          const matched = result.results.filter(m => m.muMatch && m.confidence >= 0.7).length;
-          feed(`${matched}/${result.results.length} verified`, 'green', 'export-feed');
-          updateBadges();
-        } else {
-          feed('Verification failed', 'red', 'export-feed');
-          buttons.forEach(b => b.style.pointerEvents = 'auto');
-          return;
-        }
-      } catch (err) {
-        if (err.message?.includes('aborted')) {
-          feed('Verification aborted', 'amber', 'export-feed');
-          hideProgress('export');
-        } else {
-          feed('Verify error', 'red', 'export-feed');
-        }
-        buttons.forEach(b => b.style.pointerEvents = 'auto');
-        abortBtn.classList.add('hidden');
-        return;
-      } finally {
-        state.isVerifying = false;
-        abortBtn.classList.add('hidden');
-      }
-    }
-  }
-
-  const vMap = new Map(state.verified.map(v => [v.id, v]));
-  const data = state.manga.map(m => ({ ...m, ...(vMap.get(m.id) || {}) }));
-
-  if (format === 'mal') {
-    clearFeed('export-feed');
-    progress('Preparing generation...', 0, 'export');
-    feed('Starting MAL export...', 'blue', 'export-feed');
-    abortBtn.textContent = 'Abort';
-    abortBtn.classList.remove('hidden');
-  }
-
-  try {
-    const r = await msg({ type: 'EXPORT_DATA', data, format });
-    if (r.success) {
-      toast(`Exported ${r.count || data.length} titles`, 'success');
-      if (format === 'mal') {
-        feed('XML Generated!', 'green', 'export-feed');
-        hideProgress('export');
-        setTimeout(() => clearFeed('export-feed'), 3000);
-      } else if (format === 'mangaupdates') {
-        feed('TXT Generated!', 'green', 'export-feed');
-        hideProgress('export');
-        setTimeout(() => clearFeed('export-feed'), 3000);
-      }
-    }
-    else throw new Error(r.error);
-  } catch (e) { 
-    const msgErr = e.message || 'Export failed';
-    const isAbort = msgErr.includes('aborted');
-    
-    toast(isAbort ? 'Aborted' : msgErr, isAbort ? 'info' : 'error'); 
-    if (format === 'mal') {
-      feed(isAbort ? 'Export aborted' : msgErr, isAbort ? 'amber' : 'red', 'export-feed');
-      hideProgress('export');
-    }
-  } finally {
-    buttons.forEach(b => b.style.pointerEvents = 'auto');
-    abortBtn.classList.add('hidden');
-  }
+  // Fire and forget - background worker takes complete control
+  msg({ type: 'START_BG_EXPORT', format, data: state.manga });
 }
 
 async function copyTitles() {
@@ -474,17 +419,42 @@ function closeModal() { $('modal-backdrop').classList.remove('show'); }
 
 // ── Background messages ──
 function onBgMessage(m) {
-  if (m.type === 'VERIFY_PROGRESS') {
+  if (m.type === 'VERIFY_PROGRESS' || m.type === 'MAL_EXPORT_PROGRESS') {
     const pct = Math.round((m.current / m.total) * 100);
-    progress(`Verifying ${m.current}/${m.total}...`, pct, 'export');
+    const label = m.type === 'VERIFY_PROGRESS' ? 'Verifying' : 'Fetching';
+    progress(`${label} ${m.current}/${m.total}...`, pct, 'export');
+    
     if (m.current === m.total || m.current % 10 === 0) {
-      feed(`Verified ${m.current}/${m.total}`, 'blue', 'export-feed');
+      feed(`${label} ${m.current}/${m.total}`, 'blue', 'export-feed');
     }
-  } else if (m.type === 'MAL_EXPORT_PROGRESS') {
-    const pct = Math.round((m.current / m.total) * 100);
-    progress(`Processing ${m.current}/${m.total}...`, pct, 'export');
-    // We intentionally removed the feed() item per user request
-    // so it doesn't spam the activity list for every single series
+  } else if (m.type === 'EXPORT_SUCCESS') {
+    toast(`Exported titles`, 'success');
+    feed(`${m.format === 'mal' ? 'XML' : 'TXT'} Generated!`, 'green', 'export-feed');
+    hideProgress('export');
+    setTimeout(() => clearFeed('export-feed'), 3000);
+    
+    // Auto-sync verifying in case it completed blindly in bg
+    msg({ type: 'GET_STATE' }).then(async (bgState) => {
+      if (bgState && bgState.verified) {
+        state.verified = bgState.verified; 
+        await persist(); 
+        updateBadges(); 
+        renderList();
+      }
+    }).catch(()=>{});
+    
+    $$('.export-option[data-format]').forEach(b => b.style.pointerEvents = 'auto');
+    $('btn-export-abort').classList.add('hidden');
+    state.isVerifying = false;
+  } else if (m.type === 'EXPORT_ERROR') {
+    const isAbort = m.error.includes('aborted');
+    toast(isAbort ? 'Aborted' : m.error, isAbort ? 'info' : 'error'); 
+    feed(isAbort ? 'Export aborted' : m.error, isAbort ? 'amber' : 'red', 'export-feed');
+    hideProgress('export');
+    
+    $$('.export-option[data-format]').forEach(b => b.style.pointerEvents = 'auto');
+    $('btn-export-abort').classList.add('hidden');
+    state.isVerifying = false;
   }
 }
 
